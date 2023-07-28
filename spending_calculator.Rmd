@@ -1,0 +1,455 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+
+```{r setup}
+
+library(magrittr)
+library(future.callr)
+
+future::plan(callr, workers = 5)
+
+```
+
+
+```{r define_cash_flow_function}
+
+calculate_annual_cash_flows <- function(
+  input_data
+){
+  
+  
+  input_table = input_data$input_table[[1]]
+  initial_base_infl = input_table$cost_infl[[1]]
+
+  input_table <- input_table %>%
+    dplyr::mutate(
+      rev_infl = input_data$rev_infl,
+      cost_infl = input_data$cost_infl,
+      infl = input_data$infl,
+      tot_retn = ifelse(is.na(tot_retn_premium), NA, tot_retn_premium + input_data$infl),
+      int = ifelse(is.na(int), NA, int - initial_base_infl + input_data$infl)
+    )
+    
+  
+  min_cash = input_data$min_cash
+  additional_percent_to_consider = input_data$additional_percent_to_consider
+  increment = input_data$increment
+  base_year = input_data$base_year
+  age_in_base_year = input_data$age_in_base_year
+  percentage_points_of_incremental_marginal_tax_rate = input_data$percentage_points_of_incremental_marginal_tax_rate
+  tax_status = input_data$tax_status
+  
+  
+  annual_cash_flows <- input_table %>%
+    tidyr::expand(year = tidyr::full_seq(year, 1)) %>%
+    dplyr::arrange(year) %>%
+    dplyr::left_join(input_table, c("year" = "year")) %>%
+    tidyr::fill(rev_infl, cost_infl, min_dist, int, infl, div, tot_retn) %>%
+    # dplyr::mutate(row_number = dplyr::row_number()) %>%
+    dplyr::mutate(dplyr::across(c(tot_retn, rev_infl, cost_infl, infl), ~1+.)) %>%
+    dplyr::mutate(dplyr::across(c(mortgage, spending), ~purrr::accumulate2(., cost_infl[-1], ~round(ifelse(!is.na(..2), ..2, ..1*(..3)), 0)))) %>%
+    dplyr::mutate(dplyr::across(c(pwages, psemp, ggsi), ~purrr::accumulate2(., rev_infl[-1], ~round(ifelse(!is.na(..2), ..2, ..1*(..3)), 0)))) %>%
+    dplyr::mutate(tax_output = NA,
+                  pre_tax_portfolio = NA,
+                  after_tax_portfolio = NA,
+                  age = age_in_base_year + year - base_year,
+                  tax_status = ifelse(age < 95, tax_status, 'single'))
+
+
+
+  for(i in 2:nrow(annual_cash_flows)){
+
+    print(i)
+
+    interest <- annual_cash_flows$cash[i-1]*annual_cash_flows$int[i]
+    dividends <- (annual_cash_flows$cost_basis[[i-1]]+annual_cash_flows$unrealized_gain[[i-1]])*annual_cash_flows$div[i]
+    required_net_income <- annual_cash_flows$spending[[i]] + annual_cash_flows$mortgage[[i]]
+    required_distribution <- max(annual_cash_flows$pre_tax[i-1]*annual_cash_flows$min_dist[i], 0)
+    cash_inflows <- required_distribution + annual_cash_flows$pwages[[i]] + annual_cash_flows$psemp[[i]] + annual_cash_flows$ggsi[[i]] + interest + dividends
+    net_cash_shortfall <- round(required_net_income - cash_inflows, 3)
+
+
+
+    if(((required_net_income)/.5 - cash_inflows) < annual_cash_flows$pre_tax[[i-1]]){
+
+      print("rely on pretax pension")
+
+
+
+      likely_lower_bound <- max((((net_cash_shortfall)) %/% increment)* increment, 0)
+      upper_bound <- (min(annual_cash_flows$pre_tax[i-1], annual_cash_flows$pre_tax[i-1]*additional_percent_to_consider + required_net_income/.5 + required_distribution) %/% increment)*increment
+
+        # (min(annual_cash_flows$pre_tax[i-1]*additional_percent_to_consider + required_net_income/.5 + required_distribution, annual_cash_flows$pre_tax[i-1]) %/% increment)*increment
+
+
+
+      pretax_income_test_range <- seq(likely_lower_bound, upper_bound, increment) + required_distribution
+
+
+      tax_test <- data.frame(
+        taxsimid = 1:length(pretax_income_test_range),
+        state = 'NY',
+        year = 2023,
+        mstat = annual_cash_flows$tax_status[[i]],
+        pwages = annual_cash_flows$pwages[[i]], # primary wages,
+        dividends = max(dividends, 0), # dividends,
+        intrec = max(interest, 0), # interest,
+        pensions = pretax_income_test_range, # taxable IRA distributions
+        ltcg = 0, # long term capital gains
+        cost_basis = 0, # cost basis
+        psemp = annual_cash_flows$psemp[[i]], # self employment wages
+        ggsi = annual_cash_flows$ggsi[[i]], # Gross Social Security Benefits,
+        mortgage = annual_cash_flows$mortgage[[i]], #deductions that are not a preference for the AMT
+        page = age_in_base_year + annual_cash_flows$year[[i]] - base_year # primary age
+      )
+
+      tax_test_output <- usincometaxes::taxsim_calculate_taxes(
+        .data = tax_test,
+        marginal_tax_rates = 'Wages',
+        return_all_information = FALSE
+        ) %>%
+        dplyr::left_join(tax_test, by = 'taxsimid') %>%
+        dplyr::mutate(
+          total_taxpayer_tax = fiitax + siitax + tfica,
+          total_taxpayer_income = round((pwages + pensions + psemp + ggsi + dividends + intrec), 0),
+          total_taxpayer_net_income = round(total_taxpayer_income - mortgage - total_taxpayer_tax, 0),
+          total_taxpayer_rate = round(100*total_taxpayer_tax / total_taxpayer_income, 2),
+          total_marginal_rate = frate+srate+ficar
+        )
+
+
+
+      output_solve <- tax_test_output %>%
+        # dplyr::select(total_taxpayer_net_income, total_marginal_rate, pensions, cost_basis, ltcg, total_taxpayer_rate, total_taxpayer_tax, total_taxpayer_income, total_taxpayer_net_income) %>%
+        dplyr::filter(total_taxpayer_net_income > required_net_income, pensions < annual_cash_flows$pre_tax[i-1]) %>%
+        dplyr::filter(total_marginal_rate <= min(total_marginal_rate) + percentage_points_of_incremental_marginal_tax_rate)  %>%
+        dplyr::slice_tail(n=1)
+
+    } else {
+
+      print("need to rely on after tax money")
+
+
+      capital_gains_rate = annual_cash_flows$unrealized_gain[[i-1]]/(annual_cash_flows$cost_basis[[i-1]] + annual_cash_flows$unrealized_gain[[i-1]])
+
+      after_tax_to_test = seq(max(net_cash_shortfall - annual_cash_flows$pre_tax[[i-1]], 0), ((required_net_income/.5 - cash_inflows - annual_cash_flows$pre_tax[[i-1]]) %/% increment)*increment, increment)
+
+      tax_test <- data.frame(
+        taxsimid = 1:length(after_tax_to_test),
+        state = 'NY',
+        year = 2023,
+        mstat = annual_cash_flows$tax_status[[i]],
+        pwages = annual_cash_flows$pwages[[i]], # primary wages,
+        dividends = max(dividends, 0), # dividends,
+        intrec = max(interest, 0), # interest,
+        pensions = annual_cash_flows$pre_tax[[i-1]], # taxable IRA distributions
+        ltcg = after_tax_to_test * (capital_gains_rate), # long term capital gains
+        cost_basis = after_tax_to_test * (1-capital_gains_rate),
+        psemp = annual_cash_flows$psemp[[i]], # self employment wages
+        ggsi = annual_cash_flows$ggsi[[i]], # Gross Social Security Benefits,
+        mortgage = annual_cash_flows$mortgage[[i]], #deductions that are not a preference for the AMT
+        page = age_in_base_year + annual_cash_flows$year[[i]] - base_year # primary age
+      )
+
+      tax_test_output <- usincometaxes::taxsim_calculate_taxes(
+        .data = tax_test,
+        marginal_tax_rates = 'Wages',
+        return_all_information = FALSE
+        ) %>%
+        dplyr::left_join(tax_test, by = 'taxsimid') %>%
+        dplyr::mutate(
+          total_taxpayer_tax = fiitax + siitax + tfica,
+          total_taxpayer_income = round((pwages + pensions + psemp + ggsi + dividends + intrec + cost_basis + ltcg), 0),
+          total_taxpayer_net_income = round(total_taxpayer_income - mortgage - total_taxpayer_tax, 0),
+          total_taxpayer_rate = round(100*total_taxpayer_tax / total_taxpayer_income, 2),
+          total_marginal_rate = frate+srate+ficar
+        )
+
+      output_solve <- tax_test_output %>%
+        # dplyr::select(total_taxpayer_net_income, total_marginal_rate, pensions, cost_basis, ltcg, total_taxpayer_rate, total_taxpayer_tax, total_taxpayer_income, total_taxpayer_net_income) %>%
+        dplyr::filter(total_taxpayer_net_income > required_net_income) %>%
+        dplyr::slice_head(n=1)
+
+      # if(output_solve$ltcg[[1]] > annual_cash_flows$unrealized_gain[[i-1]]){
+      #
+      #   output_solve <- output_solve %>%
+      #     dplyr::mutate(
+      #       cost_basis = cost_basis + ltcg - annual_cash_flows$unrealized_gain[[i-1]],
+      #       ltcg = annual_cash_flows$unrealized_gain[[i-1]]
+      #     )
+      #
+      #
+      # }
+
+
+    }
+
+    annual_cash_flows$pre_tax[i] <- (annual_cash_flows$pre_tax[[i-1]] - output_solve$pensions[[1]]) * (annual_cash_flows$tot_retn[[i]])
+
+    annual_cash_flows$cash[i] <- annual_cash_flows$cash[[i-1]] - (annual_cash_flows$spending[[i]] + annual_cash_flows$mortgage[[i]]) + output_solve$total_taxpayer_net_income[[1]]
+
+    cash_to_invest <- max(annual_cash_flows$cash[[i]] - min_cash, 0)
+
+
+    annual_cash_flows$cash[i] <- annual_cash_flows$cash[[i]] - cash_to_invest
+
+    annual_cash_flows$cost_basis[i] <- annual_cash_flows$cost_basis[[i-1]] - output_solve$cost_basis[[1]] + cash_to_invest
+
+    annual_cash_flows$unrealized_gain[i] <- (annual_cash_flows$unrealized_gain[[i-1]] - output_solve$ltcg[[1]])
+
+    annual_cash_flows$unrealized_gain[i] <- (annual_cash_flows$cost_basis[[i]] + annual_cash_flows$unrealized_gain[[i]]) * (annual_cash_flows$tot_retn[[i]] - annual_cash_flows$div[[i]]) - annual_cash_flows$cost_basis[[i-1]]
+
+    if(annual_cash_flows$unrealized_gain[[i]] < 0) {
+
+      annual_cash_flows$cost_basis[[i]] <- annual_cash_flows$cost_basis[[i]] + annual_cash_flows$unrealized_gain[[i]]
+      annual_cash_flows$unrealized_gain[[i]] <- 0
+
+    }
+
+
+    annual_cash_flows$tax_output[i] <- list(output_solve)
+
+    annual_cash_flows$pre_tax_portfolio[i] <- output_solve$pensions[[1]]
+    annual_cash_flows$after_tax_portfolio[i] <- output_solve$cost_basis[[1]] + output_solve$ltcg[[1]] - cash_to_invest
+
+
+  }
+
+
+  annual_cash_flows <- annual_cash_flows %>%
+    dplyr::mutate(
+      total_equity = pre_tax + cost_basis + unrealized_gain,
+      total_taxpayer_rate = purrr::map(tax_output, ~tail(purrr::pluck(.x, "total_taxpayer_rate"), 1)),
+      total_marginal_rate = purrr::map(tax_output, ~tail(purrr::pluck(.x, "total_marginal_rate"), 1)),
+      total_taxpayer_income = purrr::map(tax_output, ~tail(purrr::pluck(.x, "total_taxpayer_income"), 1)),
+      total_taxpayer_net_income = purrr::map(tax_output, ~tail(purrr::pluck(.x, "total_taxpayer_net_income"), 1))
+    )
+  
+  
+  
+}
+
+
+
+```
+
+
+```{r}
+
+inputs <- tibble::tribble(
+  
+  #see taxsim-input to understand each of the column names
+  #balance sheet account values reflect ending balances for that period / starting balances for following period
+  
+  ~year, ~pwages, ~psemp, ~ggsi, ~mortgage, ~spending, ~rev_infl, ~cost_infl, ~pre_tax, ~min_dist, ~cost_basis, ~unrealized_gain, ~cash,  ~int,  ~infl,  ~div, ~tot_retn_premium,
+  2023,   150000,      0,     0,     50000,     200000,    0.02,       0.023,  4000000,          0,     2000000,          2000000,250000,   .02,   .023,  .005,     .015,
+  2024,        0,     NA,    NA,     25000,     150000,      NA,        NA,        NA,         NA,          NA,               NA,    NA,    NA,     NA,    NA,        NA,
+  2027,       NA,     NA, 50000,        NA,         NA,      NA,        NA,        NA,        .05,          NA,               NA,    NA,    NA,     NA,  .005,      0.015,
+  2050,       NA,     NA,    NA,        NA,         NA,     NA,         NA,        NA,        .05,          NA,               NA,    NA,    NA,     NA,  .005,      0.005,
+  2070,       NA,     NA,    NA,        NA,         NA,      NA,        NA,        NA,         NA,          NA,               NA,    NA,    NA,     NA,    NA,        NA
+)
+
+
+
+
+# Begin what will go in for loop
+
+
+catch <- tibble::tibble(
+  trial_number = 1:15,
+  input_table = list(inputs),
+  additional_percent_to_consider = .2,  #c(rep(.1, 3), rep(.2, 3), rep(.5, 3)),
+  percentage_points_of_incremental_marginal_tax_rate = rep(c(0, 3, 10), 5), #rep(c(0, 3, 10), 3),
+  rev_infl = .02,
+  cost_infl = c(rep(.018, 3), rep(.0205, 3), rep(.023, 3), rep(.0255, 3), rep(.028, 3)),
+  infl = .023,
+  min_cash = 250000,
+  increment = 5000,
+  base_year = purrr::map_dbl(input_table, ~min(purrr::pluck(.x, "year"))),
+  age_in_base_year = 64 + 2023 - base_year,
+  tax_status = 'married, jointly'
+  ) %>%
+  dplyr::group_by(trial_number) %>%
+  tidyr::nest() %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    output = furrr::future_map(data, ~ calculate_annual_cash_flows(input_data = .x), .options = furrr::furrr_options(seed = TRUE)),
+    cost_infl = purrr::map_dbl(output, ~tail(purrr::pluck(.x, "cost_infl"), 1)),
+    additional_percent_to_consider = purrr::map_dbl(data, ~purrr::pluck(.x, "additional_percent_to_consider")),
+    percentage_points_of_incremental_marginal_tax_rate = purrr::map_dbl(data, ~purrr::pluck(.x, "percentage_points_of_incremental_marginal_tax_rate")),
+    ending_equity = purrr::map_dbl(output, ~tail(purrr::pluck(.x, "total_equity"), 1))
+  )
+  
+  
+
+
+  
+
+# output <- calculate_annual_cash_flows(
+#   input_table = inputs,
+#   min_cash = min_cash,
+#   additional_percent_to_consider = additional_percent_to_consider,
+#   increment = increment,
+#   base_year = base_year,
+#   age_in_base_year = age_in_base_year,
+#   percentage_points_of_incremental_marginal_tax_rate = percentage_points_of_incremental_marginal_tax_rate
+# )
+
+
+```
+
+```{r}
+
+inputs <- tibble::tribble(
+  
+  #see taxsim-input to understand each of the column names
+  #balance sheet account values reflect ending balances for that period / starting balances for following period
+  
+  ~year, ~pwages, ~psemp, ~ggsi, ~mortgage, ~spending, ~rev_infl, ~cost_infl, ~pre_tax, ~min_dist, ~cost_basis, ~unrealized_gain, ~cash,  ~int,  ~infl,  ~div, ~tot_retn_premium,
+  2023,   350000,      0,     0,     50000,     90000,     0.02,       0.023,  500000,          0,     250000,          250000,  100000,   .02,   .023,  .005,     .015,
+  2030,    50000,     NA,    NA,     0,         65000,       NA,        NA,        NA,         NA,          NA,               NA,    NA,    NA,     NA,    NA,        NA,
+  2050,        0,     NA,    NA,    NA,            NA,      NA,        NA,        NA,         NA,          NA,               NA,    NA,    NA,     NA,    NA,        NA,
+  2058,       NA,     NA, 50000,        NA,         NA,     NA,         NA,        NA,        NA,          NA,               NA,    NA,    NA,     NA,  .005,      0.01,
+  2097,       NA,     NA,    NA,        NA,         NA,      NA,        NA,        NA,         NA,          NA,               NA,    NA,    NA,     NA,    NA,        NA
+)
+
+
+
+
+# Begin what will go in for loop
+
+
+catch <- tibble::tibble(
+  trial_number = 1:15,
+  input_table = list(inputs),
+  additional_percent_to_consider = .2,  #c(rep(.1, 3), rep(.2, 3), rep(.5, 3)),
+  percentage_points_of_incremental_marginal_tax_rate = rep(c(0, 3, 10), 5), #rep(c(0, 3, 10), 3),
+  rev_infl = .02,
+  cost_infl = c(rep(.018, 3), rep(.0205, 3), rep(.023, 3), rep(.0255, 3), rep(.028, 3)),
+  infl = .023,
+  min_cash = 250000,
+  increment = 5000,
+  base_year = purrr::map_dbl(input_table, ~min(purrr::pluck(.x, "year"))),
+  age_in_base_year = 37 + 2023 - base_year,
+  tax_status = 'single'
+  ) %>%
+  dplyr::group_by(trial_number) %>%
+  tidyr::nest() %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    output = furrr::future_map(data, ~ calculate_annual_cash_flows(input_data = .x), .options = furrr::furrr_options(seed = TRUE)),
+    cost_infl = purrr::map_dbl(output, ~tail(purrr::pluck(.x, "cost_infl"), 1)),
+    additional_percent_to_consider = purrr::map_dbl(data, ~purrr::pluck(.x, "additional_percent_to_consider")),
+    percentage_points_of_incremental_marginal_tax_rate = purrr::map_dbl(data, ~purrr::pluck(.x, "percentage_points_of_incremental_marginal_tax_rate")),
+    ending_equity = purrr::map_dbl(output, ~tail(purrr::pluck(.x, "total_equity"), 1))
+  )
+  
+
+
+```
+
+
+
+
+# Value of incremental deferrals
+
+Use this to make the calculation more sophisticated later on
+
+```{r}
+
+pre_tax_or_after_tax <- function(
+  initial_income_tax_rate,
+  future_income_tax_rate,
+  dividend_and_capital_gains_tax_rate,
+  annual_dividend_percent,
+  annual_capital_gains_percent,
+  years){
+
+  
+  
+  without_deferral_and_stepup <- (1-initial_income_tax_rate)*(1 + annual_capital_gains_percent + annual_dividend_percent*(1-dividend_and_capital_gains_tax_rate))^years
+
+  without_deferral_and_roth_growth <- (1-initial_income_tax_rate)*(1 + annual_capital_gains_percent + annual_dividend_percent)^years
+  
+  gain_over_period <- (1 + annual_capital_gains_percent + annual_dividend_percent*(1-dividend_and_capital_gains_tax_rate))^years
+  capital_gains_percent <- (gain_over_period - 1)/gain_over_period
+
+  without_deferral_and_no_stepup <- without_deferral_and_stepup*(1-capital_gains_percent*dividend_and_capital_gains_tax_rate)
+  with_deferral <- ((1 + annual_dividend_percent + annual_capital_gains_percent)^years)*(1-future_income_tax_rate)
+
+  
+  # no_deferral_or_stepup <- round(without_deferral_and_no_stepup/without_deferral_and_no_stepup, 3)
+  deferral <- round(with_deferral/without_deferral_and_no_stepup, 5)
+  stepup <- round(without_deferral_and_stepup/without_deferral_and_no_stepup, 5)
+  roth <- round(without_deferral_and_roth_growth / without_deferral_and_no_stepup, 5)
+
+
+  to_return <- tibble::tibble(roth, stepup, deferral)
+
+  }
+
+
+initial_income_tax_rate <- c(.3) #seq(.3, .6, .1)
+# future_income_tax_rate_multiple <- c(.5, 1, 1.5) #seq(.5, 2, .25)
+future_income_tax_rate = seq(.2, .5, .1)
+# dividend_and_capital_gains_tax_rate <- c(.24) #c(0, .15, .2, .24)
+years <- c(30) #seq(10, 30, 10)
+annual_dividend_percent <- seq(.005, .015, .005)
+annual_total_return <- seq(0, .06, .03)
+
+# catch2 <- tidyr::expand_grid(initial_income_tax_rate, future_income_tax_rate, dividend_and_capital_gains_tax_rate, years, annual_dividend_percent, annual_total_return) %>%
+#   dplyr::mutate(
+#     # future_income_tax_rate = initial_income_tax_rate * future_income_tax_rate_multiple,
+#     annual_capital_gains_percent = round(annual_total_return - annual_dividend_percent, 4),
+#     dividend_and_capital_gains_tax_rate = dplyr::case_when(
+#       future_income_tax_rate < .3 ~ .15,
+#       future_income_tax_rate < .4 ~ .2,
+#       TRUE ~ .24
+#     ),
+#     output = pre_tax_or_after_tax(initial_income_tax_rate, future_income_tax_rate, dividend_and_capital_gains_tax_rate, annual_dividend_percent, annual_capital_gains_percent, years)
+#     ) %>%
+#   tidyr::unpack(output) %>%
+#   dplyr::mutate(
+#     roth_preferred = (roth >= deferral & roth >= stepup  & roth > 1),
+#     stepup_preferred = (stepup >= deferral & stepup >= roth & stepup > 1),
+#     deferral_preferred = (deferral >= stepup & deferral >= roth & deferral > 1),
+#     no_deferral_or_stepup_preferred = !(stepup_preferred | deferral_preferred | roth_preferred)
+#   )
+
+
+
+
+
+
+```
+
+
+# Value of step up
+
+Use this to make the calculation more sophisticated later on
+
+```{r}
+
+capital_gains_rate_now <- .25
+average_gain <- .5
+rate_on_sale_of_property <- capital_gains_rate_now*average_gain
+
+
+
+
+initial_tax_rate = .25
+future_tax_rate = 2*initial_tax_rate
+
+without_deferral <- (1-initial_tax_rate)*(1 + .06*(1-initial_tax_rate))^30
+with_deferral <- ((1)*(1 + .06)^30)*(1-future_tax_rate)
+with_deferral/without_deferral
+
+
+```
+
+

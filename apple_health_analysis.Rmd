@@ -1,0 +1,45 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+
+library(magrittr)
+
+
+raw_data <- readr::read_csv("running_data_apple.csv", skip = 1) %>%
+  janitor::clean_names() %>%
+  dplyr::select(-c(device, total_swimming_stroke_count, hk_metadata_key_sync_version, hk_metadata_key_sync_identifier, hk_external_uuid, hk_group_fitness)) %>%
+  dplyr::mutate(
+    # date = stringr::str_c(month, "01", year, sep = "-"),
+    total_distance = as.numeric(stringr::str_replace(total_distance, " m", "")),
+    date = lubridate::as_date(end_date),
+    month = as.Date(lubridate::ceiling_date(date, "month")) - 1,
+    year = as.Date(lubridate::ceiling_date(date, "year")) - 1
+  ) 
+
+
+summary_of_raw_data <- raw_data %>%
+  dplyr::filter(
+    total_distance > 250
+  ) %>%
+  dplyr::group_by(month) %>%
+  dplyr::summarise(
+    distance = sum(total_distance, na.rm = TRUE)/1609,
+    duration = sum(duration, na.rm = TRUE)/60/60,
+    events = dplyr::n(),
+    average_distance = round(distance/events, 3),
+    average_duration = round(60*duration/events, 0),
+    average_pace_per_mile = round(60*duration/distance, 3),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(desc(month)) %>%
+  dplyr::mutate(
+    cumulative_distance = cumsum(distance)
+  )
+
+
+
+```
+

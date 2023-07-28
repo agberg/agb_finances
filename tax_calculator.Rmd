@@ -1,0 +1,47 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+
+library(dplyr)
+library(usincometaxes)
+
+family_income <- data.frame(
+  taxsimid = c(1, 2, 3, 4, 5, 6),
+  state = c('AR', 'AR', 'AR', 'AR', 'NY', 'NY'),
+  year = c(2022, 2023, 2023, 2023, 2022, 2023),
+  mstat = c('single', 'single', 'single', 'single', 'married, jointly', 'single'),
+  pwages = c(250000, 650000, 100000, 80000, 500000, 0), # primary wages,
+  dividends = c(3000, 3000, 3000, 3000, 3000*8, 57705), # dividends,
+  intrec = c(1000, 5000, 5000, 5000, 5000, 5000), # dividends,
+  ltcg = c(0, 0, 0, 0, 0, 189669),
+  pensions = c(0, 0, 0, 0, 0, 0), # taxable IRA distributions
+  psemp = c(0, 0, 0, 0, 0, 0), # self employment wages
+  ggsi = c(0, 0, 0, 0, 0, 90567), # Gross Social Security Benefits,
+  mortgage = c(60000, 130000, 0, 0, 50000, 21177), #deductions that are not a preference for the AMT
+  page = c(36, 37, 37, 37, 65, 90), # primary age,
+  cost_basis = c(0, 0, 0, 0, 0, 65910.01)
+)
+
+family_taxes <- taxsim_calculate_taxes(
+  .data = family_income,
+  marginal_tax_rates = 'Wages',
+  return_all_information = FALSE
+) 
+
+family_output <- family_income %>%
+  left_join(family_taxes, by = 'taxsimid') %>%
+  dplyr::mutate(
+    total_taxpayer_tax = fiitax + siitax + tfica,
+    total_taxpayer_income = (pwages + pensions + psemp + ggsi + dividends + intrec + cost_basis + ltcg),
+    total_taxpayer_net_income = total_taxpayer_income - mortgage - total_taxpayer_tax,
+    total_taxpayer_rate = round(100*total_taxpayer_tax / total_taxpayer_income, 0),
+  )
+
+View(family_output)
+
+```
+

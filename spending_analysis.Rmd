@@ -1,0 +1,120 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+
+library(magrittr)
+
+
+raw_data <- readr::read_csv("ynab-2023-07-13.csv") %>%
+  janitor::clean_names() %>%
+  dplyr::select(-c(average, total)) %>%
+  tidyr::pivot_longer(cols = -c(category_group, category)) %>%
+  tidyr::separate(name, into = c("month", "year"), sep = "_") %>%
+  # dplyr::filter(value != 0) %>%
+  dplyr::mutate(
+    date = stringr::str_c(month, "01", year, sep = "-"),
+    date = lubridate::as_date(date, format = "%b-%d-%Y"),
+    date = as.Date(lubridate::ceiling_date(date, "month")) - 1
+  ) %>%
+  dplyr::select(-c(month, year))
+
+
+
+
+```
+
+```{r}
+
+rolling_totals_function <- function(raw_data_input, months_to_roll_input, ...){
+  rolling_totals <- raw_data_input %>%
+    # dplyr::filter(category %in% c("Salaried Job")) %>%
+    dplyr::group_by(..., date) %>%
+    dplyr::summarise(
+      dplyr::across(.cols = c(value), ~sum(.x)),
+      .groups = "drop"
+    ) %>%
+    dplyr::group_by(...) %>%
+    dplyr::mutate(
+      beginning_of_window = lubridate::ceiling_date(
+        lubridate::add_with_rollback(date, months(-months_to_roll_input)), "month"),
+      roll_month_sum = 
+        slider::slide_index_dbl(value, date, sum, .before = ~
+                                  lubridate::ceiling_date(
+                                    lubridate::add_with_rollback(date, months(-months_to_roll_input)), "month")),
+      # Normalize to a 12-month view
+      roll_month_sum = roll_month_sum * 12/months_to_roll_input,
+
+      ) %>%
+    dplyr::select(-c(value)) 
+  
+  after_tax_revenue <- rolling_totals %>%
+    dplyr::filter(
+      category_group %in% c("Revenue", "Taxes")
+    ) %>%
+    dplyr::group_by(date) %>%
+    dplyr::summarise(
+      after_tax_revenue = sum(roll_month_sum, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  
+  rolling_totals_with_totals <- rolling_totals %>%
+    dplyr::left_join(after_tax_revenue, by = c("date" = "date")) %>%
+    dplyr::mutate(
+      percent_of_total = round(roll_month_sum/after_tax_revenue, 3),
+      roll_month_sum = round(roll_month_sum,2)
+    ) %>%
+    dplyr::arrange(desc(date), roll_month_sum)
+  
+  output_percent <- rolling_totals_with_totals %>%
+    dplyr::select(..., date, percent_of_total) %>%
+    dplyr::arrange(desc(date)) %>%
+    dplyr::filter(
+      date %in% unique(rolling_totals_with_totals$date)[c(1,2,3,4,7,10,13,16,19,22,25,28,31,34,37)]
+    ) %>%
+    tidyr::pivot_wider(names_from = date, values_from = percent_of_total) 
+  
+  output <- rolling_totals_with_totals %>%
+    dplyr::select(..., date, roll_month_sum) %>%
+    dplyr::arrange(desc(date)) %>%
+    dplyr::filter(
+      date %in% unique(rolling_totals_with_totals$date)[c(1,2,3,4,7,10,13,16,19,22,25,28,31,34,37)]
+    ) %>%
+    tidyr::pivot_wider(names_from = date, values_from = roll_month_sum) 
+  
+  
+  to_return <- list(
+    rolling_totals_with_totals = rolling_totals_with_totals,
+    output_percent = output_percent,
+    output = output
+    
+  )
+  
+}
+
+
+months_to_roll <- 48
+
+long_term <- rolling_totals_function(raw_data_input = raw_data, months_to_roll_input = months_to_roll,
+                                 category_group)
+
+months_to_roll <- 12
+
+short_term <- rolling_totals_function(raw_data_input = raw_data, months_to_roll_input = months_to_roll,
+                                 category_group)
+
+short_term_detail <- rolling_totals_function(raw_data_input = raw_data, months_to_roll_input = months_to_roll,
+                                 category_group, category)
+
+
+core_expenses <- short_term$output %>% dplyr::filter(category_group %in% c("Health (10%)", "Travel (4%)", "Fun Stuff (2%)", "Relationship (3%)", "Work (1.5%)"))
+
+summary_of_core_expenses <- core_expenses %>% dplyr::ungroup() %>% dplyr::summarise(dplyr::across(.cols = -1 , .fns = ~sum(.x)))
+
+# summary_of_all_expenses <- short_term$output %>% dplyr::ungroup() %>% dplyr::summarise(dplyr::across(.cols = -1 , .fns = ~sum(.x)))
+
+```
+
