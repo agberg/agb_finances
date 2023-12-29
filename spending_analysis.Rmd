@@ -8,7 +8,7 @@ output: html_notebook
 library(magrittr)
 
 
-raw_data <- readr::read_csv("ynab-2023-07-13.csv") %>%
+raw_data <- readr::read_csv("ynab-2023-09-09.csv") %>%
   janitor::clean_names() %>%
   dplyr::select(-c(average, total)) %>%
   tidyr::pivot_longer(cols = -c(category_group, category)) %>%
@@ -110,11 +110,32 @@ short_term_detail <- rolling_totals_function(raw_data_input = raw_data, months_t
                                  category_group, category)
 
 
-core_expenses <- short_term$output %>% dplyr::filter(category_group %in% c("Health (10%)", "Travel (4%)", "Fun Stuff (2%)", "Relationship (3%)", "Work (1.5%)"))
+core_expenses <- short_term_detail$output %>% dplyr::filter(category_group %in% c("Health (10%)", "Travel (4%)", "Fun Stuff (2%)", "Relationship (3%)", "Work (1.5%)"))  
 
-summary_of_core_expenses <- core_expenses %>% dplyr::ungroup() %>% dplyr::summarise(dplyr::across(.cols = -1 , .fns = ~sum(.x)))
+summary_of_core_expenses <- core_expenses %>%
+  dplyr::mutate(
+    category_classification = dplyr::case_when(
+      category %in% c("Savings Vs. Renting") ~ "Savings Vs. Renting",
+      category %in% c("Car Depreciation") ~ "Car Depreciation",
+      category %in% c("Bigger Trips") ~ "Bigger Trips",
+      category %in% c("Izzy Education") ~ "Education Accrual",
+      TRUE ~ "Normal Expense"
+    )
+  ) %>% 
+  dplyr::group_by(category_classification) %>% dplyr::summarise(dplyr::across(where(is.numeric), .fns = ~sum(.x)))
 
 # summary_of_all_expenses <- short_term$output %>% dplyr::ungroup() %>% dplyr::summarise(dplyr::across(.cols = -1 , .fns = ~sum(.x)))
+
+```
+
+```{r}
+
+catch <- short_term_detail$output %>% 
+  dplyr::filter(category %in% c("Groceries", "Food with Friends", "Restaurants, Take Out, Coffee Shops", "Buying Time")) %>%
+  dplyr::ungroup() %>%
+  dplyr::summarise(dplyr::across(where(is.numeric), sum))
+
+
 
 ```
 

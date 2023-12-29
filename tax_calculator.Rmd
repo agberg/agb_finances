@@ -11,20 +11,25 @@ library(usincometaxes)
 
 family_income <- data.frame(
   taxsimid = c(1, 2, 3, 4, 5, 6),
-  state = c('AR', 'AR', 'AR', 'AR', 'NY', 'NY'),
-  year = c(2022, 2023, 2023, 2023, 2022, 2023),
-  mstat = c('single', 'single', 'single', 'single', 'married, jointly', 'single'),
-  pwages = c(250000, 650000, 100000, 80000, 500000, 0), # primary wages,
-  dividends = c(3000, 3000, 3000, 3000, 3000*8, 57705), # dividends,
-  intrec = c(1000, 5000, 5000, 5000, 5000, 5000), # dividends,
-  ltcg = c(0, 0, 0, 0, 0, 189669),
+  state = c('AR', 'AR', 'AR', 'AR', 'AR', 'AR'),
+  year = c(2023, 2023, 2023, 2023, 2023, 2023),
+  mstat = c('single', 'single', 'single', 'single', 'single', 'single'),
+  pwages = c(250000, 450000, 450000, 450000, 450000, 450000), # primary wages,
+  dividends = c(3000, 3000, 3000, 3000, 3000, 3000), # dividends,
+  intrec = c(5000, 5000, 5000, 5000, 5000, 5000), # dividends,
+  ltcg = c(0, 0, 0, 0, 0, 0),
   pensions = c(0, 0, 0, 0, 0, 0), # taxable IRA distributions
   psemp = c(0, 0, 0, 0, 0, 0), # self employment wages
-  ggsi = c(0, 0, 0, 0, 0, 90567), # Gross Social Security Benefits,
-  mortgage = c(60000, 130000, 0, 0, 50000, 21177), #deductions that are not a preference for the AMT
-  page = c(36, 37, 37, 37, 65, 90), # primary age,
-  cost_basis = c(0, 0, 0, 0, 0, 65910.01)
-)
+  ggsi = c(0, 0, 0, 0, 0, 0), # Gross Social Security Benefits,
+  mortgage = c(60000, 200000, 150000,100000, 50000, 0), #deductions that are not a preference for the AMT
+  page = c(37, 37, 37, 37, 37, 37), # primary age,
+  cost_basis = c(0, 0, 0, 0, 0, 0)
+) %>%
+  dplyr::mutate(
+    deferred_income = 22500,
+    pwages = pwages - deferred_income,
+    deferred_income = deferred_income + .06 * ifelse(pwages>300000, 300000, pwages)
+  )
 
 family_taxes <- taxsim_calculate_taxes(
   .data = family_income,
@@ -32,13 +37,28 @@ family_taxes <- taxsim_calculate_taxes(
   return_all_information = FALSE
 ) 
 
+spending_amount = 65000
+
 family_output <- family_income %>%
   left_join(family_taxes, by = 'taxsimid') %>%
   dplyr::mutate(
     total_taxpayer_tax = fiitax + siitax + tfica,
-    total_taxpayer_income = (pwages + pensions + psemp + ggsi + dividends + intrec + cost_basis + ltcg),
-    total_taxpayer_net_income = total_taxpayer_income - mortgage - total_taxpayer_tax,
+    total_taxpayer_income = (pwages + pensions + psemp + ggsi + deferred_income + dividends + intrec),
+    total_taxpayer_net_income = total_taxpayer_income - total_taxpayer_tax,
+    donations_change = mortgage - dplyr::lag(mortgage, 1),
+    savings = total_taxpayer_net_income - mortgage - spending_amount,
+    savings_change = savings - dplyr::lag(savings, 1),
+    savings_and_donations = savings + mortgage,
+    savings_and_donations_change = savings_and_donations - dplyr::lag(savings_and_donations, 1),
+    ratio = round(100*savings_change/donations_change, 0),
     total_taxpayer_rate = round(100*total_taxpayer_tax / total_taxpayer_income, 0),
+    marginal_taxpayer_rate = frate + srate + ficar,
+    percent_donations = round(100*mortgage / total_taxpayer_net_income, 0),
+    percent_savings = round(100*savings / total_taxpayer_net_income, 0),
+    percent_donations_and_savings = percent_donations + percent_savings,
+    percent_spending = round(100*spending_amount / total_taxpayer_net_income, 0),
+    percent_spending_gross = round(100*spending_amount / total_taxpayer_income, 0),
+    percent_donations_and_savings_gross = round(100*savings_and_donations / total_taxpayer_income, 0)
   )
 
 View(family_output)
